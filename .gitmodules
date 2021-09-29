@@ -228,3 +228,6 @@
 [submodule "contrib/libpqxx"]
 	path = contrib/libpqxx
 	url = https://github.com/ClickHouse-Extras/libpqxx.git
+[submodule "contrib/eigen"]
+	path = contrib/eigen
+	url = https://gitlab.com/libeigen/eigen.git
