@@ -3,8 +3,12 @@
 //
 #include <Eigen/Core>
 
+#include <Columns/ColumnTuple.h>
+#include <DataTypes/DataTypeTuple.h>
 #include <DataTypes/DataTypesNumber.h>
 #include <Functions/FunctionFactory.h>
+#include <Functions/FunctionHelpers.h>
+
 #include "FunctionArrayMapped.h"
 
 namespace DB
@@ -22,84 +26,95 @@ public:
 
     DataTypePtr getReturnTypeImpl(const ColumnsWithTypeAndName & arguments) const override
     {
-        if (arguments.size() < 2)
+        if (arguments.size() != 2)
             throw Exception(
-                "Function " + getName() + " needs at least two argument; passed " + toString(arguments.size()) + ".",
+                "Function arrayDistance needs exactly two argument; passed " + toString(arguments.size()) + ".",
                 ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH);
 
-        DataTypePtr arguments_type;
-        for (size_t index = 0; index < arguments.size(); ++index)
+        size_t total_size = 1;
+        DataTypePtr nested_type = nullptr;
+
+        for (const auto & argument : arguments)
         {
-            const DataTypeArray * array_type = checkAndGetDataType<DataTypeArray>(arguments[index].type.get());
-
-            if (!array_type)
-                throw Exception(
-                    "Argument " + toString(index + 1) + " of function " + getName() + " must be array. Found "
-                        + arguments[index].type->getName() + " instead.",
-                    ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT);
-
-            if (!arguments_type)
-            {
-                arguments_type = array_type->getNestedType();
-            }
-            else if (!areTypesEqual(arguments_type, array_type->getNestedType()))
+            const DataTypeTuple * tuple_type = checkAndGetDataType<DataTypeTuple>(argument.type.get());
+            if (!tuple_type)
             {
                 throw Exception(
-                    "Argument " + toString(index + 1) + " of function " + getName() + " must be same type of first argument, which is "
-                        + arguments[0].type->getName() + ".",
+                    "Arguments of function arrayDistance must be tuple of array. Found " + argument.type->getName() + " instead.",
                     ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT);
             }
+
+            const DataTypes & elements = tuple_type->getElements();
+            if (elements.empty())
+            {
+                throw Exception("Nested array of function arrayDistance tuples can not be empty.", ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT);
+            }
+
+            for (const auto & element : elements)
+            {
+                const auto & type_ptr = getArrayNestedType(element);
+                if (!nested_type)
+                {
+                    nested_type = type_ptr;
+                }
+                else if (!nested_type->equals(*type_ptr))
+                {
+                    throw Exception(
+                        "Nested array of function arrayDistance tuples must have identical type.", ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT);
+                }
+            }
+
+            total_size *= elements.size();
         }
-        return std::make_shared<DataTypeArray>(nested_result_type);
+
+        switch (nested_type->getTypeId())
+        {
+            case TypeIndex::UInt8:
+                break;
+            case TypeIndex::Float32:
+                break;
+            default:
+                throw Exception(
+                    "Nested type of function arrayDistance tuples must be array of uint8 or float32.",
+                    ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT);
+        }
+
+        // return type tuple(float32)
+        DataTypes types(total_size, nested_result_type);
+        return std::make_shared<DataTypeTuple>(types);
     }
 
     ColumnPtr
     executeImpl(const ColumnsWithTypeAndName & arguments, const DataTypePtr & result_type, size_t /*input_rows_count*/) const override
     {
         size_t num_arguments = arguments.size();
-        if (num_arguments < 2)
+        if (num_arguments != 2)
         {
-            throw Exception("At least two Argument required.", ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH);
+            throw Exception("Function arrayDistance requires two arguments.", ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH);
         }
 
         const auto & return_type = result_type;
         auto res_ptr = return_type->createColumn();
-        ColumnArray & res = assert_cast<ColumnArray &>(*res_ptr);
-        IColumn & res_data = res.getData();
-        ColumnArray::Offsets & res_offsets = res.getOffsets();
+        ColumnTuple & res = assert_cast<ColumnTuple &>(*res_ptr);
 
-        const DataTypeArray * first_column_type = checkAndGetDataType<DataTypeArray>(arguments[0].type.get());
-        const DataTypePtr first_column_nested_type = first_column_type->getNestedType();
-        const ColumnPtr first_column = arguments[0].column;
+        const DataTypeTuple * tuple_type = checkAndGetDataType<DataTypeTuple>(arguments[0].type.get());
+        const DataTypes & elements = tuple_type->getElements();
+        const DataTypePtr & nested_type = getArrayNestedType(elements.front());
 
-        /*
-        const ColumnArray * first_column_array = checkAndGetColumn<ColumnArray>(first_column_ptr.get());
+        Columns first = getColumnsFromTuple(arguments[0].column);
+        Columns second = getConstColumnsFromTuple(arguments[1].column);
 
-        if (!first_column_array) {
-            throw Exception(
-                "Argument 1 of function " + getName() + " must be array."
-                " Found column " + first_column_ptr->getName() + " instead.",
-                ErrorCodes::ILLEGAL_COLUMN);
-        }
-        */
-
-        std::vector<const ColumnPtr> columns;
-        for (size_t i = 1; i < num_arguments; ++i)
-        {
-            columns.emplace_back(arguments[i].column);
-        }
-
-        switch (first_column_nested_type->getTypeId())
+        switch (nested_type->getTypeId())
         {
             case TypeIndex::UInt8:
-                executeMatrix<UInt8>(first_column, columns, res_data, res_offsets);
+                executeMatrix<UInt8>(first, second, res);
                 break;
             case TypeIndex::Float32:
-                executeMatrix<Float32>(first_column, columns, res_data, res_offsets);
+                executeMatrix<Float32>(first, second, res);
                 break;
             default:
                 throw Exception(
-                    "Nested array type " + first_column_nested_type->getName() + " is not supported as argument of function arrayDistance.",
+                    "Nested array type " + nested_type->getName() + " is not supported as argument of function arrayDistance.",
                     ErrorCodes::ILLEGAL_COLUMN);
         }
 
@@ -107,66 +122,109 @@ public:
     }
 
 private:
-    template <typename T>
-    static bool
-    executeMatrix(const ColumnPtr first_column, std::vector<const ColumnPtr> columns, IColumn & res_col, ColumnArray::Offsets & res_offsets)
+    static const DataTypePtr & getArrayNestedType(const DataTypePtr & type_ptr)
     {
-        PaddedPODArray<RT> & res_data = typeid_cast<ColumnVector<RT> &>(res_col).getData();
+        const DataTypeArray * array_type = checkAndGetDataType<DataTypeArray>(type_ptr.get());
+        if (!array_type)
+        {
+            throw Exception(
+                "Nested type of function arrayDistance tuples must be array of uint8 or float32. Found " + type_ptr->getName()
+                    + " instead.",
+                ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT);
+        }
+        return array_type->getNestedType();
+    }
+
+    static Columns getColumnsFromTuple(const ColumnPtr & column_ptr)
+    {
+        const ColumnTuple * tuple_column = checkAndGetColumn<ColumnTuple>(column_ptr->convertToFullColumnIfConst().get());
+
+        if (!tuple_column)
+        {
+            throw Exception(
+                ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT,
+                "First argument of function arrayDistance should be tuple, got {}",
+                column_ptr->getName());
+        }
+        return tuple_column->getColumnsCopy();
+    }
+
+    static Columns getConstColumnsFromTuple(const ColumnPtr & column_ptr)
+    {
+        const ColumnTuple * tuple_column = checkAndGetColumnConstData<ColumnTuple>(column_ptr.get());
+
+        if (!tuple_column)
+        {
+            throw Exception(
+                ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT,
+                "Second argument of function arrayDistance should be const tuple, got {}",
+                column_ptr->getName());
+        }
+        return tuple_column->getColumnsCopy();
+    }
+
+    template <typename T>
+    static bool executeMatrix(Columns first, Columns second, ColumnTuple & result)
+    {
+        //PaddedPODArray<RT> & res_data = typeid_cast<ColumnVector<RT> &>(res_col).getData();
+        std::vector<size_t> off_x, off_y;
         Eigen::MatrixX<RT> mx, my;
 
-        if (!columnToMatrix<T>(first_column, &mx))
+        if (!columnsToMatrix<T>(first, off_x, mx))
         {
             throw Exception("First argument of function arrayDistance must be array. ", ErrorCodes::ILLEGAL_COLUMN);
         }
         //std::cout << "matrix x:\n" << mx << std::endl;
 
-        if (!constColumnsToMatrix<T>(columns, &my))
+        if (!columnsToMatrix<T>(second, off_y, my))
         {
             throw Exception("Arguments of function arrayDistance must be const array. ", ErrorCodes::ILLEGAL_COLUMN);
         }
         //std::cout << "matrix y:\n" << my << std::endl;
 
-        for (auto col : mx.colwise())
+        if (mx.rows() != my.rows())
         {
-            auto norms = (my.colwise() - col).colwise().norm();
-            for (auto norm : norms)
-            {
-                res_data.emplace_back(norm);
-            }
+            throw Exception("Arrays of function arrayDistance have different sizes.", ErrorCodes::SIZES_OF_ARRAYS_DOESNT_MATCH);
+        }
 
-            res_offsets.emplace_back(res_data.size());
+        size_t prev_x = 0, prev_y = 0;
+        for (auto col : my.colwise())
+        {
+            auto norms = (mx.colwise() - col).colwise().norm();
+
+            prev_x = 0;
+            for (size_t i = 0; i < off_x.size(); ++i)
+            {
+                auto & column = result.getColumn(prev_y + i);
+                for (size_t j = prev_x; j < off_x[i]; ++j)
+                    column.insert(norms[j]);
+                prev_x = off_x[i];
+            }
+            prev_y += off_x.size();
         }
 
         return true;
     }
 
     template <typename T>
-    static bool constColumnsToMatrix(std::vector<const ColumnPtr> columns, Eigen::MatrixX<RT> * mat)
+    static bool columnsToMatrix(Columns & columns, std::vector<size_t> & off, Eigen::MatrixX<RT> & mat)
     {
-        const ColumnPtr & first_column = columns[0];
-        const ColumnConst * first_column_const = checkAndGetColumnConst<ColumnArray>(first_column.get());
-        if (!first_column_const)
+        ColumnPtr & first_column = columns.front();
+        const ColumnArray * first_array = checkAndGetColumn<ColumnArray>(first_column->convertToFullColumnIfConst().get());
+        if (!first_array)
             return false;
 
-        const ColumnArray * first_const_array = checkAndGetColumn<ColumnArray>(first_column_const->getDataColumnPtr().get());
-        if (!first_const_array)
-            return false;
-
-        const ColumnArray::Offsets & offsets = first_const_array->getOffsets();
-        mat->resize(offsets.front(), offsets.size() * columns.size());
+        const ColumnArray::Offsets & offsets = first_array->getOffsets();
+        mat.resize(offsets.front(), offsets.size() * columns.size());
 
         ColumnArray::Offset col = 0;
         for (const ColumnPtr & column : columns)
         {
-            const ColumnConst * const_column = checkAndGetColumnConst<ColumnArray>(column.get());
-            if (!const_column)
+            const ColumnArray * column_array = checkAndGetColumn<ColumnArray>(column->convertToFullColumnIfConst().get());
+            if (!column_array)
                 return false;
 
-            const ColumnArray * const_array = checkAndGetColumn<ColumnArray>(const_column->getDataColumnPtr().get());
-            if (!const_array)
-                return false;
-
-            const ColumnVector<T> * column_vec = checkAndGetColumn<ColumnVector<T>>(const_array->getData());
+            const ColumnVector<T> * column_vec = checkAndGetColumn<ColumnVector<T>>(column_array->getData());
             const PaddedPODArray<T> & column_data = column_vec->getData();
 
             ColumnArray::Offset prev = 0;
@@ -174,40 +232,14 @@ private:
             {
                 for (ColumnArray::Offset idx = 0; idx < offset - prev; ++idx)
                 {
-                    (*mat)(idx, col) = column_data[prev + idx];
+                    mat(idx, col) = column_data[prev + idx];
                 }
                 ++col;
                 prev = offset;
             }
+            off.emplace_back(col);
         }
 
-        return true;
-    }
-
-    template <typename T>
-    static bool columnToMatrix(const ColumnPtr column, Eigen::MatrixX<RT> * mat)
-    {
-        const ColumnPtr & column_ptr = column->convertToFullColumnIfConst();
-        const ColumnArray * column_array = checkAndGetColumn<ColumnArray>(column_ptr.get());
-        if (!column_array)
-            return false;
-
-        const ColumnArray::Offsets & offsets = column_array->getOffsets();
-        mat->resize(offsets.front(), offsets.size());
-
-        const ColumnVector<T> * column_vec = checkAndGetColumn<ColumnVector<T>>(column_array->getData());
-        const PaddedPODArray<T> & column_data = column_vec->getData();
-
-        ColumnArray::Offset col = 0, prev = 0;
-        for (auto offset : offsets)
-        {
-            for (ColumnArray::Offset idx = 0; idx < offset - prev; ++idx)
-            {
-                (*mat)(idx, col) = column_data[prev + idx];
-            }
-            ++col;
-            prev = offset;
-        }
         return true;
     }
 
