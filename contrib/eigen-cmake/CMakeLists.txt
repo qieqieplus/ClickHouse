@@ -1,7 +1,3 @@
-if (NOT USE_INTERNAL_EIGEN)
-    return()
-endif()
-
 set(EIGEN_LIBRARY_DIR "${ClickHouse_SOURCE_DIR}/contrib/eigen")
 
 # Imported target support

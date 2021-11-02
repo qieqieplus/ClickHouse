@@ -27,9 +27,11 @@ public:
     DataTypePtr getReturnTypeImpl(const ColumnsWithTypeAndName & arguments) const override
     {
         if (arguments.size() != 2)
+        {
             throw Exception(
                 "Function arrayDistance needs exactly two argument; passed " + toString(arguments.size()) + ".",
                 ErrorCodes::NUMBER_OF_ARGUMENTS_DOESNT_MATCH);
+        }
 
         size_t total_size = 1;
         DataTypePtr nested_type = nullptr;
@@ -49,7 +51,6 @@ public:
             {
                 throw Exception("Nested array of function arrayDistance tuples can not be empty.", ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT);
             }
-
             for (const auto & element : elements)
             {
                 const auto & type_ptr = getArrayNestedType(element);
@@ -101,7 +102,7 @@ public:
         const DataTypes & elements = tuple_type->getElements();
         const DataTypePtr & nested_type = getArrayNestedType(elements.front());
 
-        Columns first = getColumnsFromTuple(arguments[0].column);
+        Columns first = getColumnsFromTuple(arguments[0].column->convertToFullColumnIfConst());
         Columns second = getConstColumnsFromTuple(arguments[1].column);
 
         switch (nested_type->getTypeId())
@@ -137,7 +138,7 @@ private:
 
     static Columns getColumnsFromTuple(const ColumnPtr & column_ptr)
     {
-        const ColumnTuple * tuple_column = checkAndGetColumn<ColumnTuple>(column_ptr->convertToFullColumnIfConst().get());
+        const ColumnTuple * tuple_column = checkAndGetColumn<ColumnTuple>(column_ptr.get());
 
         if (!tuple_column)
         {
@@ -164,9 +165,8 @@ private:
     }
 
     template <typename T>
-    static bool executeMatrix(Columns first, Columns second, ColumnTuple & result)
+    static bool executeMatrix(const Columns & first, const Columns & second, ColumnTuple & result)
     {
-        //PaddedPODArray<RT> & res_data = typeid_cast<ColumnVector<RT> &>(res_col).getData();
         std::vector<size_t> off_x, off_y;
         Eigen::MatrixX<RT> mx, my;
 
@@ -182,7 +182,7 @@ private:
         }
         //std::cout << "matrix y:\n" << my << std::endl;
 
-        if (mx.rows() != my.rows())
+        if (mx.rows() && my.rows() && mx.rows() != my.rows())
         {
             throw Exception("Arrays of function arrayDistance have different sizes.", ErrorCodes::SIZES_OF_ARRAYS_DOESNT_MATCH);
         }
@@ -207,10 +207,10 @@ private:
     }
 
     template <typename T>
-    static bool columnsToMatrix(Columns & columns, std::vector<size_t> & off, Eigen::MatrixX<RT> & mat)
+    static bool columnsToMatrix(const Columns & columns, std::vector<size_t> & off, Eigen::MatrixX<RT> & mat)
     {
-        ColumnPtr & first_column = columns.front();
-        const ColumnArray * first_array = checkAndGetColumn<ColumnArray>(first_column->convertToFullColumnIfConst().get());
+        const ColumnPtr & first_column = columns.front();
+        const ColumnArray * first_array = checkAndGetColumn<ColumnArray>(first_column.get());
         if (!first_array)
             return false;
 
@@ -220,7 +220,7 @@ private:
         ColumnArray::Offset col = 0;
         for (const ColumnPtr & column : columns)
         {
-            const ColumnArray * column_array = checkAndGetColumn<ColumnArray>(column->convertToFullColumnIfConst().get());
+            const ColumnArray * column_array = checkAndGetColumn<ColumnArray>(column.get());
             if (!column_array)
                 return false;
 
