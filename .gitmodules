@@ -268,3 +268,9 @@
 [submodule "contrib/hashidsxx"]
 	path = contrib/hashidsxx
 	url = https://github.com/schoentoon/hashidsxx.git
+[submodule "contrib/diskann"]
+	path = contrib/diskann
+	url = https://github.com/JungleTryne/DiskANN.git
+[submodule "contrib/gperftools"]
+	path = contrib/gperftools
+	url = https://github.com/gperftools/gperftools.git
