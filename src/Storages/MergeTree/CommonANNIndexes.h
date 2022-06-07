@@ -117,9 +117,6 @@ private:
             // DistanceFunctions
             FUNCTION_DISTANCE,
 
-            //tuple(0.1, ..., 0.1)
-            FUNCTION_TUPLE,
-
             // Operators <, >, <=, >=
             FUNCTION_COMPARISON,
 
@@ -132,11 +129,20 @@ private:
             // Column identifier
             FUNCTION_IDENTIFIER,
 
-            // Unknown, can be any value
-            FUNCTION_UNKNOWN,
+            // array(0.1, ..., 0.1)
+            FUNCTION_ARRAY,
+
+            // [0.1, ...., 0.1] vector without word 'array'
+            FUNCTION_LITERAL_ARRAY,
+
+            // tuple(0.1, ..., 0.1)
+            FUNCTION_TUPLE,
 
             // (0.1, ...., 0.1) vector without word 'tuple'
             FUNCTION_LITERAL_TUPLE,
+
+            // Unknown, can be any value
+            FUNCTION_UNKNOWN,
         };
 
         explicit RPNElement(Function function_ = FUNCTION_UNKNOWN)
@@ -148,6 +154,7 @@ private:
         std::optional<float> float_literal;
         std::optional<String> identifier;
         std::optional<int64_t> int_literal{std::nullopt};
+        std::optional<Array> array_literal{std::nullopt};
         std::optional<Tuple> tuple_literal{std::nullopt};
 
         UInt32 dim{0};

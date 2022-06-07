@@ -4,6 +4,9 @@
 #include <parameters.h>
 #include <utils.h>
 
+#include <Columns/ColumnArray.h>
+#include <Columns/ColumnTuple.h>
+
 #include <Interpreters/ExpressionActions.h>
 #include <Interpreters/ExpressionAnalyzer.h>
 #include <Interpreters/TreeRewriter.h>
@@ -26,6 +29,7 @@ namespace ErrorCodes
     extern const int INCORRECT_QUERY;
     extern const int LOGICAL_ERROR;
     extern const int UNKNOWN_EXCEPTION;
+    extern const int SIZES_OF_ARRAYS_DOESNT_MATCH;
 }
 
 namespace detail
@@ -325,16 +329,59 @@ void MergeTreeIndexAggregatorDiskANN::flattenAccumulatedData(std::vector<std::ve
             accumulated_data.push_back(data[dim][current_element]);
         }
     }
-
-    LOG_DEBUG(&Poco::Logger::get("DiskANN"), "Flattened the data, size: {};", accumulated_data.size());
 }
+
+template <>
+void MergeTreeIndexAggregatorDiskANN::updateWithType<TypeIndex::Tuple>(const ColumnPtr column)
+{
+    std::vector<std::vector<DiskANNValue>> data;
+    const auto * vectors = typeid_cast<const ColumnTuple *>(column.get());
+    for (const auto & inner_column : vectors->getColumns())
+    {
+        const auto * coords = typeid_cast<const ColumnFloat32 *>(inner_column.get());
+        auto v = std::vector<Float32>(coords->getData().begin(), coords->getData().end());
+        data.push_back(std::move(v));
+    }
+
+    LOG_DEBUG(&Poco::Logger::get("DiskANN"), "Got data, dimensions: {};", data.size());
+    flattenAccumulatedData(std::move(data));
+}
+
+
+template <>
+void MergeTreeIndexAggregatorDiskANN::updateWithType<TypeIndex::Array>(const ColumnPtr column)
+{
+    const auto * vectors = typeid_cast<const ColumnArray *>(column.get());
+    const auto & data = typeid_cast<const ColumnVector<Float32> &>(vectors->getData()).getData();
+    const auto & offsets = vectors->getOffsets();
+
+    dimensions = offsets.empty()? 0: offsets.front();
+    ColumnArray::Offset prev = 0;
+
+    for (auto off : offsets)
+    {
+        if (unlikely((off - prev) != dimensions.value()))
+        {
+            throw Exception(
+                ErrorCodes::SIZES_OF_ARRAYS_DOESNT_MATCH,
+                "Dimension of array does not align, expect {},  got {}",
+                dimensions.value(), off - prev);
+        }
+        prev = off;
+    }
+
+    accumulated_data.clear();
+    accumulated_data.insert(accumulated_data.end(), data.begin(), data.end());
+}
+
 
 void MergeTreeIndexAggregatorDiskANN::update(const Block & block, size_t * pos, size_t limit)
 {
     if (*pos >= block.rows())
         throw Exception(
-                "The provided position is not less than the number of block rows. Position: "
-                + toString(*pos) + ", Block rows: " + toString(block.rows()) + ".", ErrorCodes::LOGICAL_ERROR);
+            "The provided position is not less than the number of block rows. Position: " + toString(*pos)
+                + ", Block rows: " + toString(block.rows()) + ".",
+            ErrorCodes::LOGICAL_ERROR);
 
     size_t rows_read = std::min(limit, block.rows() - *pos);
 
@@ -346,25 +393,24 @@ void MergeTreeIndexAggregatorDiskANN::update(const Block & block, size_t * pos, 
     auto index_column_name = index_sample_block.getByPosition(0).name;
     const auto & column = block.getByName(index_column_name).column->cut(*pos, rows_read);
 
-    std::vector<std::vector<Float32>> coords_vector;
-    const auto * vectors = typeid_cast<const ColumnTuple *>(column.get());
-    for (const auto & inner_column : vectors->getColumns())
+    switch (column->getDataType())
     {
-        const auto * coords = typeid_cast<const ColumnFloat32 *>(inner_column.get());
-        auto v = std::vector<Float32>(coords->getData().begin(), coords->getData().end());
-        coords_vector.push_back(std::move(v));
+        case TypeIndex::Array:
+            updateWithType<TypeIndex::Array>(column);
+            break;
+        case TypeIndex::Tuple:
+            updateWithType<TypeIndex::Tuple>(column);
+            break;
+        default:
+            throw Exception("invalid data type for ann index", ErrorCodes::ILLEGAL_TYPE_OF_ARGUMENT);
     }
 
-    LOG_DEBUG(&Poco::Logger::get("DiskANN"), "Got data, dimensions: {};", coords_vector.size());
-    flattenAccumulatedData(std::move(coords_vector));
-
     *pos += rows_read;
+    LOG_DEBUG(&Poco::Logger::get("DiskANN"), "Update block data, size: {};", accumulated_data.size());
 }
 
 MergeTreeIndexConditionDiskANN::MergeTreeIndexConditionDiskANN(
-    const IndexDescription & /*index*/,
-    const SelectQueryInfo & query,
-    ContextPtr context)
+    const IndexDescription & /*index*/, const SelectQueryInfo & query, ContextPtr context)
     : common_condition(query, context)
 {
     LOG_DEBUG(&Poco::Logger::get("DiskANN"), "Built DiskANN Condition");
@@ -414,7 +460,11 @@ std::vector<size_t> MergeTreeIndexConditionDiskANN::getUsefulRanges(MergeTreeInd
     std::unordered_set<size_t> useful_granules;
     for (size_t i = 0; i < limit; ++i)
     {
-        LOG_DEBUG(&Poco::Logger::get("DiskANN"), "Distance: {}", search_result.distances[i]);
+        LOG_DEBUG(
+            &Poco::Logger::get("DiskANN"),
+            "Index {}, Distance: {}",
+            search_result.indicies[i], search_result.distances[i]
+        );
 
         if (comp_dist_maybe.has_value() &&
             search_result.distances[i] >= comp_dist_maybe.value() * comp_dist_maybe.value())
@@ -535,7 +585,6 @@ void diskANNIndexValidator(const IndexDescription & index, bool /* attach */)
     {
         throw Exception("DiskANN pruning_set_size argument must be a positive integer", ErrorCodes::INCORRECT_QUERY);
     }
-
 }
 
 }

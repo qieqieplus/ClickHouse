@@ -76,6 +76,8 @@ struct MergeTreeIndexAggregatorDiskANN final : IMergeTreeIndexAggregator
     void update(const Block & block, size_t * pos, size_t limit) override;
 
 private:
+    template <TypeIndex T>
+    void updateWithType(const ColumnPtr column);
     void flattenAccumulatedData(std::vector<std::vector<DiskANNValue>> data);
 
     String index_name;

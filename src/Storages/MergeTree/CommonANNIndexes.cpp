@@ -170,6 +170,10 @@ bool ANNCondition::traverseAtomAST(const ASTPtr & node, RPNElement & out)
         {
             out.function = RPNElement::FUNCTION_DISTANCE;
         }
+        else if (function->name == "array")
+        {
+            out.function = RPNElement::FUNCTION_ARRAY;
+        }
         else if (function->name == "tuple")
         {
             out.function = RPNElement::FUNCTION_TUPLE;
@@ -229,6 +233,13 @@ bool ANNCondition::tryCastToConstType(const ASTPtr & node, RPNElement & out)
             out.function = RPNElement::FUNCTION_INT_LITERAL;
             out.int_literal.emplace(const_value.get<Int64>());
             out.func_name = "Int literal";
+            return true;
+        }
+        if (const_value.getType() == Field::Types::Array)
+        {
+            out.function = RPNElement::FUNCTION_LITERAL_ARRAY;
+            out.array_literal = const_value.get<Array>();
+            out.func_name = "Array literal";
             return true;
         }
         if (const_value.getType() == Field::Types::Tuple)
@@ -368,6 +379,20 @@ bool ANNCondition::matchMainParts(RPN::iterator & iter, RPN::iterator & end,
     {
         identifier_found = true;
         expr.column_name = getIdentifierOrPanic(iter);
+        ++iter;
+    }
+
+    if (iter->function == RPNElement::FUNCTION_ARRAY)
+    {
+        ++iter;
+    }
+
+    if (iter->function == RPNElement::FUNCTION_LITERAL_ARRAY)
+    {
+        for (const auto & value : iter->array_literal.value())
+        {
+            expr.target.emplace_back(value.get<float>());
+        }
         ++iter;
     }
 
